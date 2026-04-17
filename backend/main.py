@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 
 load_dotenv()
 
-app = FastAPI(title="HCP AI Logger")
+app = FastAPI(title="HCP AI Logger - 5 LLMs Demo")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,68 +39,80 @@ form_state: Dict[str, Any] = {
 
 class Message(BaseModel):
     message: str
+    model_choice: str = "llama-3.3-70b-versatile"   # default model
 
-# ==================== 5 LANGGRAPH TOOLS ====================
+# ==================== 5 LANGGRAPH TOOLS (Mandatory) ====================
 
 @tool
 def log_interaction(details: str) -> str:
-    """Log full interaction details from natural language."""
+    """Log full interaction from natural language."""
     global form_state
     form_state["topics_discussed"] = details
-    return "✅ Interaction successfully logged and form updated."
+    return "✅ Interaction logged successfully."
 
 @tool
 def edit_field(field: str, value: str) -> str:
-    """Update any specific field in the form."""
+    """Edit any field in the form."""
     global form_state
     key = field.lower().replace(" ", "_").replace("-", "_")
     if key in form_state:
         form_state[key] = value
-        return f"✅ Updated '{field}' to: {value}"
-    return f"❌ Field '{field}' not found."
+        return f"✅ Updated {field} → {value}"
+    return f"❌ Field not found."
 
 @tool
 def set_hcp_name(name: str) -> str:
-    """Set the HCP name."""
+    """Set HCP name."""
     global form_state
     form_state["hcp_name"] = name
-    return f"✅ HCP Name set to: {name}"
+    return f"✅ HCP set to {name}"
 
 @tool
 def set_sentiment(sentiment: str) -> str:
-    """Set sentiment - Positive, Neutral, or Negative."""
+    """Set sentiment: Positive / Neutral / Negative."""
     global form_state
     sent = sentiment.capitalize()
     if sent in ["Positive", "Neutral", "Negative"]:
         form_state["sentiment"] = sent
-        return f"✅ Sentiment set to: {sent}"
-    return "❌ Please use: Positive, Neutral, or Negative"
+        return f"✅ Sentiment: {sent}"
+    return "❌ Use: Positive, Neutral, Negative"
 
 @tool
 def add_followup(action: str) -> str:
-    """Add a follow-up action."""
+    """Add follow-up action."""
     global form_state
-    if form_state.get("follow_up_actions"):
+    if form_state["follow_up_actions"]:
         form_state["follow_up_actions"] += f"\n- {action}"
     else:
         form_state["follow_up_actions"] = f"- {action}"
-    return f"✅ Follow-up action added: {action}"
+    return f"✅ Follow-up added."
 
 tools = [log_interaction, edit_field, set_hcp_name, set_sentiment, add_followup]
 
-# LLM Setup
-groq_api_key = os.getenv("GROQ_API_KEY")
-if not groq_api_key:
-    raise ValueError("❌ GROQ_API_KEY not found in .env file! Please add it.")
+# ==================== 5 DIFFERENT LLMs (from Groq) ====================
 
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    temperature=0.2,
-    api_key=groq_api_key
-)
+def get_llm(model_name: str):
+    models = {
+        "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",   # Strong reasoning
+        "llama-3.1-8b-instant": "llama-3.1-8b-instant",         # Fast & cheap
+        "gemma2-9b-it": "gemma2-9b-it",                         # Good for structured tasks
+        # Add more if Groq has them (you can test in playground)
+        "llama-4-scout-17b": "meta-llama/llama-4-scout-17b-16e-instruct",  # if available
+        "mixtral": "mixtral-8x7b-32768"                         # fallback if supported
+    }
+    selected = models.get(model_name, "llama-3.3-70b-versatile")
+    
+    return ChatGroq(
+        model=selected,
+        temperature=0.2,
+        api_key=os.getenv("GROQ_API_KEY")
+    )
 
+# Default LLM
+llm = get_llm("llama-3.3-70b-versatile")
 llm_with_tools = llm.bind_tools(tools)
 
+# LangGraph (same as before)
 def call_agent(state):
     messages = state["messages"]
     response = llm_with_tools.invoke(messages)
@@ -113,7 +125,7 @@ workflow.add_node("tools", lambda x: x)
 workflow.set_entry_point("agent")
 workflow.add_conditional_edges(
     "agent",
-    lambda x: "tools" if getattr(x.get("messages", [{}])[-1], "tool_calls", None) else END
+    lambda x: "tools" if getattr(x["messages"][-1], "tool_calls", None) else END
 )
 workflow.add_edge("tools", "agent")
 
@@ -124,35 +136,28 @@ graph = workflow.compile()
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
-    <html>
-        <head><title>HCP AI Logger</title></head>
-        <body style="font-family: Arial; text-align: center; padding: 50px;">
-            <h1>✅ HCP AI Logger Backend is Running!</h1>
-            <p>Backend is live on http://127.0.0.1:8000</p>
-            <p><strong>Available Endpoints:</strong></p>
-            <ul style="display: inline-block; text-align: left;">
-                <li><strong>GET /</strong> → This page</li>
-                <li><strong>POST /chat</strong> → Send message to AI</li>
-                <li><strong>GET /form-data</strong> → Get current form data</li>
-            </ul>
-            <p>Now start the React frontend and test it.</p>
-        </body>
-    </html>
+    <h1 style="text-align:center; padding:40px; font-family:Arial;">
+        ✅ HCP AI Logger Backend Running<br>
+        <small>5 Tools + Multiple LLMs Ready</small>
+    </h1>
     """
 
 @app.post("/chat")
 async def chat(msg: Message):
-    global form_state
-    try:
-        result = graph.invoke({"messages": [HumanMessage(content=msg.message)]})
-        ai_reply = result["messages"][-1].content
-        
-        return {
-            "ai_response": ai_reply,
-            "form_data": form_state
-        }
-    except Exception as e:
-        return {"error": str(e)}, 500
+    global form_state, llm_with_tools
+    
+    # Switch model if user sends different choice
+    llm = get_llm(msg.model_choice)
+    llm_with_tools = llm.bind_tools(tools)
+    
+    result = graph.invoke({"messages": [HumanMessage(content=msg.message)]})
+    ai_reply = result["messages"][-1].content
+    
+    return {
+        "ai_response": f"[Model: {msg.model_choice}] {ai_reply}",
+        "form_data": form_state,
+        "used_model": msg.model_choice
+    }
 
 @app.get("/form-data")
 async def get_form():
